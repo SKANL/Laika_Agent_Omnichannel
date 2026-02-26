@@ -1,0 +1,61 @@
+# ==========================================
+# LAIKA: ENTERPRISE AI AGENT REQUIREMENTS
+# ==========================================
+# Stack: FastAPI, LangGraph, LiteLLM, PgVector
+#
+# NOTA DE PRODUCCIÓN:
+#   Los paquetes del Layer Cognitivo (sección 6) están fijados con ==
+#   a las versiones exactas verificadas en el contenedor de desarrollo.
+#   Actualizar explícitamente y testar antes de cambiar cualquier versión.
+#   Para obtener un lock completo de TODAS las dependencias transitivas:
+#     docker exec laika_api pip freeze > requirements.lock
+# ==========================================
+
+# --- 1. Gateway & Framework ---
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+gunicorn==22.0.0
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-dotenv==1.0.1
+python-multipart==0.0.12
+httpx==0.27.2                   # Cliente HTTP asíncrono (n8n_tool.py)
+PyYAML==6.0.2                   # Parsing YAML (router.py, evaluator.py)
+
+# --- 2. Seguridad & Auth ---
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# --- 3. Base de Datos & MultiTenant (RLS) ---
+SQLAlchemy[asyncio]==2.0.35
+asyncpg==0.29.0
+psycopg[binary,pool]==3.2.3     # Standard para AsyncPostgresSaver y LangGraph Postgres
+pgvector==0.3.5                 # Búsqueda semántica nativa
+
+# --- 4. Tareas Asíncronas (Broker) ---
+redis==5.1.1
+celery==5.4.0                   # Control del Latido Proactivo (Heartbeat/Cron) y colas
+
+# --- 5. Observabilidad & Tracing ---
+structlog==24.4.0               # Logs en JSON estricto (producción)
+langfuse==3.14.5                # FIJADO — SDK v3 con OTEL, cambios de API son breaking
+
+# --- 6. Layer Cognitivo (Routing & Workflows) ---
+# CRÍTICO: Estas versiones están fijadas a las verificadas en el contenedor.
+# LangChain, LangGraph y LiteLLM tienen historial de breaking changes entre minor versions.
+langchain-core==1.2.16
+langchain==1.2.10
+langchain-community==0.4.1
+langchain-litellm==0.5.1        # ChatLiteLLM wrapper — depende de langchain-core y litellm
+langgraph==1.0.9
+langgraph-checkpoint-postgres==2.0.21  # Checkpointers B2B por Tenant — verificar schema al actualizar
+litellm==1.81.15                # Gateway multi-proveedor (Groq, Cerebras, fallbacks)
+
+# --- 7. Embeddings Locales (GPU T-1000) ---
+# Requiere drivers Nvidia + CUDA en el host físico.
+# Descomenta estas líneas solo en el entorno de producción con GPU.
+sentence-transformers>=2.7.0
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch
+torchvision
+torchaudio

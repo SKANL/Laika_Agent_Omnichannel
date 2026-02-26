@@ -1,0 +1,27 @@
+# ==========================================
+# REGISTRO DE MODELOS (MODO TIER FREE)
+# ==========================================
+# Este archivo aísla la selección de las cadenas Python
+# permitiendo Hot-Swapping sin recompilar el SaaS.
+
+routing_models:
+  primary:
+    provider: groq
+    model_id: llama-3.1-8b-instant
+    capabilities: [routing, small_talk, quick_evals]
+    context_size: 8000
+    tpm_limit: 6000 # Límite Tier free Groq
+  fallback:
+    provider: cerebras
+    model_id: llama3.1-8b
+
+heavy_lifters:
+  primary:
+    provider: cerebras
+    model_id: llama3.1-70b
+    capabilities: [orchestration, rag_synthesis, complex_extraction]
+    context_size: 60000
+    tpm_limit: 60000 # Límite Tier free Cerebras
+  fallback:
+    provider: groq
+    model_id: llama-3.3-70b-versatile

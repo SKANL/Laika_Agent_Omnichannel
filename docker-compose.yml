@@ -1,0 +1,305 @@
+# =============================================================================================================
+# YAML ANCHORS — deben estar en el top level para que Docker Compose los ignore en la validación.
+# Los anchors (&nombre) definidos aquí se referencian dentro de services con (*nombre).
+# =============================================================================================================
+
+# ---------------------------------------------------------------------------
+# ANCHOR 1: Variables de entorno compartidas por AMBOS servicios de Langfuse
+# ---------------------------------------------------------------------------
+x-langfuse-common-env: &langfuse-common-env
+  DATABASE_URL: postgresql://${POSTGRES_USER:-laika_admin}:${POSTGRES_PASSWORD:-laika_secure_pass_2026}@postgres:5432/${POSTGRES_DB:-laika_db}
+  NEXTAUTH_URL: ${LANGFUSE_BASE_URL:-http://localhost:3000}
+  NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-super_secret_nextauth_signing_key_2026}
+  SALT: ${LANGFUSE_SALT:-super_secret_salt_for_passwords_2026}
+  ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+  TELEMETRY_ENABLED: "false"
+  LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse_secure_2026}
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_AUTH: ${REDIS_PASSWORD:-laika_redis_secure_2026}
+  REDIS_TLS_ENABLED: "false"
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minio1234}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9099
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: us-east-1
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minio1234}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9099
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+
+# ---------------------------------------------------------------------------
+# ANCHOR 2: Dependencias comunes para langfuse web y langfuse_worker
+# ---------------------------------------------------------------------------
+x-langfuse-depends: &langfuse-depends
+  postgres:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  clickhouse:
+    condition: service_healthy
+  minio_init:
+    condition: service_completed_successfully
+
+# ---------------------------------------------------------------------------
+# ANCHOR 3: Variables de entorno compartidas por laika_api y celery_worker
+# ---------------------------------------------------------------------------
+x-laika-app-env: &laika-app-env
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-laika_admin}:${POSTGRES_PASSWORD:-laika_secure_pass_2026}@postgres:5432/${POSTGRES_DB:-laika_db}
+  REDIS_URL: redis://:${REDIS_PASSWORD:-laika_redis_secure_2026}@redis:6379/0
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+  TIMEZONE: ${TIMEZONE:-America/Mexico_City}
+  LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+  LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+  LANGFUSE_BASE_URL: http://langfuse:3000
+  GROQ_API_KEY: ${GROQ_API_KEY}
+  CEREBRAS_API_KEY: ${CEREBRAS_API_KEY}
+
+# =============================================================================================================
+services:
+  # -----------------------------------------------------------------------------------------------
+  # 1. BASE DE DATOS UNIFICADA (RAG, CHECKPOINTING Y LANGFUSE)
+  # -----------------------------------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: laika_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-laika_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-laika_secure_pass_2026}
+      POSTGRES_DB: ${POSTGRES_DB:-laika_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-laika_admin} -d ${POSTGRES_DB:-laika_db}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # -----------------------------------------------------------------------------------------------
+  # 1.5 BASE DE DATOS ANALÍTICA (REQUERIDA POR LANGFUSE V3)
+  # -----------------------------------------------------------------------------------------------
+  clickhouse:
+    image: clickhouse/clickhouse-server
+    container_name: laika_clickhouse
+    hostname: clickhouse
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse_secure_2026}
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # -----------------------------------------------------------------------------------------------
+  # 1.6 ALMACENAMIENTO S3 LOCAL (REQUERIDO POR LANGFUSE V3 PARA TRACES)
+  # -----------------------------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: laika_minio
+    restart: unless-stopped
+    ports:
+      - "9090:9090"   # Console UI → http://localhost:9090 (user: minio / minio1234)
+      - "9099:9099"   # S3 API endpoint
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio1234}
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9090" --address ":9099"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9099/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Crea el bucket 'langfuse' en MinIO al arrancar
+  minio_init:
+    image: minio/mc:latest
+    container_name: laika_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9099 ${MINIO_ROOT_USER:-minio} ${MINIO_ROOT_PASSWORD:-minio1234};
+        mc mb --ignore-existing local/langfuse;
+        exit 0;
+      "
+
+  # -----------------------------------------------------------------------------------------------
+  # 2. BROKER ASÍNCRONO (COLAS, LATIDO PROACTIVO Y RATE LIMITS)
+  # NOTA: Redis corre CON contraseña para aislamiento adecuado entre Celery y Langfuse.
+  # REDIS_PASSWORD debe configurarse en .env. Todos los servicios usan la misma contraseña.
+  # -----------------------------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: laika_redis
+    restart: unless-stopped
+    command: >
+      redis-server --requirepass ${REDIS_PASSWORD:-laika_redis_secure_2026}
+                   --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-laika_redis_secure_2026}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ==============================================================================================
+  # BLOQUE OBSERVABILIDAD — LANGFUSE V3 (ARQUITECTURA DUAL WEB + WORKER)
+  # ==============================================================================================
+  # IMPORTANTE: Sin langfuse_worker, NINGÚN trace aparece en el dashboard.
+  # Flujo: SDK → langfuse (MinIO+Redis) → langfuse_worker (ClickHouse) → Dashboard
+  # ==============================================================================================
+
+  # -----------------------------------------------------------------------------------------------
+  # 3A. LANGFUSE WEB — Dashboard + ingesta de eventos del SDK
+  # -----------------------------------------------------------------------------------------------
+  langfuse:
+    image: langfuse/langfuse:3
+    container_name: laika_langfuse
+    restart: unless-stopped
+    depends_on: *langfuse-depends
+    ports:
+      - "3000:3000"
+    environment:
+      <<: *langfuse-common-env
+
+  # -----------------------------------------------------------------------------------------------
+  # 3B. OBSERVABILIDAD — LANGFUSE WORKER (Procesador de trazas S3 → ClickHouse)
+  # CRÍTICO: Sin este servicio, NINGÚN trace aparece en el dashboard.
+  # El worker lee las referencias de Redis, descarga los eventos de MinIO/S3
+  # y los escribe en ClickHouse para que el web pueda consultarlos.
+  # -----------------------------------------------------------------------------------------------
+  langfuse_worker:
+    image: langfuse/langfuse-worker:3
+    container_name: laika_langfuse_worker
+    restart: unless-stopped
+    depends_on: *langfuse-depends
+    ports:
+      - "3030:3030"
+    environment:
+      <<: *langfuse-common-env
+
+  # -----------------------------------------------------------------------------------------------
+  # 4. SISTEMA NERVIOSO Y CONTROL INVERSO (N8N)
+  # -----------------------------------------------------------------------------------------------
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.9.2
+    container_name: laika_n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - NODE_ENV=production
+      - WEBHOOK_URL=${N8N_WEBHOOK_URL:-http://localhost:5678/}
+      - GENERIC_TIMEZONE=${TIMEZONE:-America/Mexico_City}
+      - N8N_TRUST_PROXIES=true
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+  # -----------------------------------------------------------------------------------------------
+  # 5. CEREBRO COGNITIVO — FastAPI (entry point HTTP)
+  # -----------------------------------------------------------------------------------------------
+  laika_api:
+    build: .
+    container_name: laika_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      langfuse:
+        condition: service_started
+      langfuse_worker:
+        condition: service_started
+    environment:
+      <<: *laika-app-env
+    volumes:
+      - ./src:/app/src
+    # Hot-Reload activo sólo en desarrollo. En producción quitar --reload y usar Gunicorn+Uvicorn.
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # -----------------------------------------------------------------------------------------------
+  # 6. EXPOSICIÓN A INTERNET (NGROK PARA N8N)
+  # -----------------------------------------------------------------------------------------------
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: laika_ngrok
+    restart: unless-stopped
+    ports:
+      - "4040:4040"
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    command: http n8n:5678
+    depends_on:
+      - n8n
+
+  # -----------------------------------------------------------------------------------------------
+  # 7. CONSUMIDOR DE TAREAS COGNITIVAS (CELERY WORKER)
+  # -----------------------------------------------------------------------------------------------
+  celery_worker:
+    build: .
+    container_name: laika_celery_worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      langfuse:
+        condition: service_started
+      langfuse_worker:
+        condition: service_started
+    environment:
+      <<: *laika-app-env
+      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://n8n:5678/}
+      N8N_API_KEY: ${N8N_API_KEY}
+    volumes:
+      - ./src:/app/src
+    command: celery -A src.worker.celery_app.celery_app worker --loglevel=info --concurrency=2
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+  clickhouse_logs:
+  redis_data:
+  n8n_data:
+  minio_data:
