@@ -1,27 +1,225 @@
 # ==========================================
-# REGISTRO DE MODELOS (MODO TIER FREE)
+# REGISTRO DE MODELOS — ROTACIÓN AUTOMÁTICA FREE TIER
 # ==========================================
-# Este archivo aísla la selección de las cadenas Python
-# permitiendo Hot-Swapping sin recompilar el SaaS.
+# Arquitectura de pools por categoría.
+# La rotación inteligente maximiza TPM global combinando todos los modelos free.
+#
+# CAMPOS POR MODELO:
+#   id          → clave única (usada en Redis para tracking por modelo)
+#   provider    → groq | cerebras
+#   model_id    → string exacto que espera la API del proveedor
+#   active      → true = incluido en el pool de rotación; false = excluido
+#   tool_use    → true = soporta bind_tools() de LangChain
+#   weight      → prioridad relativa en modo smart (≈ tpm / 2000, escalado a mano)
+#                 a mayor weight, más tráfico asignado cuando el modelo está disponible
+#   notes       → contexto para operadores; no se usa en código
+#   limits      → límites REALES del free tier (fuente: consolas Groq y Cerebras, Feb 2026)
+#                 rpm/rpd = requests; tpm/tpd = tokens
+#
+# ESTRATEGIAS DE ROTACIÓN (settings.rotation_strategy):
+#   smart        → descarta modelos en cooldown/>threshold, elige el de mayor weight disponible
+#   round_robin  → turnos equitativos (útil para distribuir RPD cuando TPM no es la limitante)
+#
+# DEPRECADOS EXCLUIDOS (modelos marcados como Deprecated en Groq a Feb 2026):
+#   meta-llama/llama-4-maverick-17b-128e-instruct
+#   meta-llama/llama-guard-4-12b
+#   moonshotai/kimi-k2-instruct  (solo el non-0905)
+# ==========================================
 
-routing_models:
-  primary:
-    provider: groq
-    model_id: llama-3.1-8b-instant
-    capabilities: [routing, small_talk, quick_evals]
-    context_size: 8000
-    tpm_limit: 6000 # Límite Tier free Groq
-  fallback:
-    provider: cerebras
-    model_id: llama3.1-8b
+settings:
+  rotation_enabled: true            # Master switch — false = siempre usar el primer activo del pool
+  rotation_strategy: smart          # smart | round_robin
+  block_threshold: 0.90             # Excluir modelo de rotación si supera este % de sus límites TPM/RPM
+  warn_threshold: 0.85              # Loguear warning sin excluir
 
-heavy_lifters:
-  primary:
-    provider: cerebras
-    model_id: llama3.1-70b
-    capabilities: [orchestration, rag_synthesis, complex_extraction]
-    context_size: 60000
-    tpm_limit: 60000 # Límite Tier free Cerebras
-  fallback:
-    provider: groq
-    model_id: llama-3.3-70b-versatile
+categories:
+
+  # ─────────────────────────────────────────────────────────────────
+  # ROUTING: modelos rápidos/ligeros
+  # Casos de uso: clasificación de intent, small_talk, evaluaciones rápidas
+  # ─────────────────────────────────────────────────────────────────
+  routing:
+    description: "Modelos rápidos para routing, small_talk y evaluación ligera"
+    rotation_enabled: true
+    pool:
+
+      - id: groq_llama31_8b
+        provider: groq
+        model_id: llama-3.1-8b-instant
+        active: true
+        tool_use: true
+        weight: 3
+        notes: "6K TPM, 14.4K RPD — workhorse de routing en Groq"
+        limits: { rpm: 30, rpd: 14400, tpm: 6000, tpd: 500000 }
+
+      - id: groq_allam_2_7b
+        provider: groq
+        model_id: allam-2-7b
+        active: true
+        tool_use: true
+        weight: 2
+        notes: "6K TPM, 7K RPD — alternativa ligera, optimizado para árabe/inglés"
+        limits: { rpm: 30, rpd: 7000, tpm: 6000, tpd: 500000 }
+
+      - id: groq_openai_oss_20b
+        provider: groq
+        model_id: openai/gpt-oss-20b
+        active: true
+        tool_use: true
+        weight: 4
+        notes: "8K TPM, 1K RPD — compatible con API de OpenAI vía Groq"
+        limits: { rpm: 30, rpd: 1000, tpm: 8000, tpd: 200000 }
+
+      - id: cerebras_llama31_8b
+        provider: cerebras
+        model_id: llama3.1-8b
+        active: true
+        tool_use: true
+        weight: 10
+        notes: "60K TPM, 14.4K RPD — el más generoso del free tier para routing"
+        limits: { rpm: 30, rpd: 14400, tpm: 60000, tpd: 1000000 }
+
+  # ─────────────────────────────────────────────────────────────────
+  # ORCHESTRATION: modelos pesados con tool_use
+  # Casos de uso: RAG synthesis, razonamiento complejo, bind_tools() en LangGraph
+  # ─────────────────────────────────────────────────────────────────
+  orchestration:
+    description: "Modelos pesados para RAG synthesis, reasoning y tool use complejo"
+    rotation_enabled: true
+    pool:
+
+      - id: groq_llama33_70b
+        provider: groq
+        model_id: llama-3.3-70b-versatile
+        active: true
+        tool_use: true
+        weight: 6
+        notes: "12K TPM, 128K ctx, 1K RPD — heavy lifter principal de Groq"
+        limits: { rpm: 30, rpd: 1000, tpm: 12000, tpd: 100000 }
+
+      - id: groq_llama4_scout
+        provider: groq
+        model_id: meta-llama/llama-4-scout-17b-16e-instruct
+        active: true
+        tool_use: true
+        weight: 15
+        notes: "30K TPM, 500K TPD — mayor presupuesto de tokens en Groq. Estrella del pool"
+        limits: { rpm: 30, rpd: 1000, tpm: 30000, tpd: 500000 }
+
+      - id: groq_kimi_k2_0905
+        provider: groq
+        model_id: moonshotai/kimi-k2-instruct-0905
+        active: true
+        tool_use: true
+        weight: 5
+        notes: "10K TPM, 60 RPM — el mayor RPM de todos los modelos Groq"
+        limits: { rpm: 60, rpd: 1000, tpm: 10000, tpd: 300000 }
+
+      - id: groq_openai_oss_120b
+        provider: groq
+        model_id: openai/gpt-oss-120b
+        active: true
+        tool_use: true
+        weight: 4
+        notes: "8K TPM, 1K RPD — modelo 120B de OpenAI vía Groq"
+        limits: { rpm: 30, rpd: 1000, tpm: 8000, tpd: 200000 }
+
+      - id: groq_qwen3_32b
+        provider: groq
+        model_id: qwen/qwen3-32b
+        active: true
+        tool_use: true
+        weight: 3
+        notes: "6K TPM, 60 RPM, 1K RPD — modelo Qwen3 de Alibaba"
+        limits: { rpm: 60, rpd: 1000, tpm: 6000, tpd: 500000 }
+
+      - id: cerebras_gpt_oss_120b
+        provider: cerebras
+        model_id: gpt-oss-120b
+        active: true
+        tool_use: true
+        weight: 32
+        notes: "64K TPM, 14.4K RPD — el mayor presupuesto de tokens de todo el free tier"
+        limits: { rpm: 30, rpd: 14400, tpm: 64000, tpd: 1000000 }
+
+      - id: cerebras_qwen3_235b
+        provider: cerebras
+        model_id: qwen-3-235b-a22b-instruct-2507
+        active: true
+        tool_use: true
+        weight: 30
+        notes: "60K TPM, 14.4K RPD — modelo más potente en Cerebras free tier (235B params)"
+        limits: { rpm: 30, rpd: 14400, tpm: 60000, tpd: 1000000 }
+
+      - id: cerebras_zai_glm
+        provider: cerebras
+        model_id: zai-glm-4.7
+        active: false
+        tool_use: true
+        weight: 1
+        notes: "ADVERTENCIA: Solo 100 RPD — activar solo para experimentos puntuales"
+        limits: { rpm: 10, rpd: 100, tpm: 60000, tpd: 1000000 }
+
+  # ─────────────────────────────────────────────────────────────────
+  # COMPOUND: agentes nativos de Groq con tools integradas en el modelo
+  # Casos de uso: tool use nativo sin bind_tools(), experimentación con agentes Groq
+  # ADVERTENCIA: Solo 250 RPD — pool desactivado por defecto
+  # ─────────────────────────────────────────────────────────────────
+  compound:
+    description: "Groq Compound — agente nativo con tools integradas (250 RPD, usar con cuidado)"
+    rotation_enabled: false
+    pool:
+
+      - id: groq_compound
+        provider: groq
+        model_id: groq/compound
+        active: false
+        tool_use: true
+        weight: 2
+        notes: "70K TPM pero solo 250 RPD. Activar para casos aislados de tool use nativo"
+        limits: { rpm: 30, rpd: 250, tpm: 70000, tpd: null }
+
+      - id: groq_compound_mini
+        provider: groq
+        model_id: groq/compound-mini
+        active: false
+        tool_use: true
+        weight: 1
+        notes: "70K TPM, 250 RPD. Versión mini — más rápida que compound"
+        limits: { rpm: 30, rpd: 250, tpm: 70000, tpd: null }
+
+  # ─────────────────────────────────────────────────────────────────
+  # MODERATION: modelos especializados en seguridad/filtrado de contenido
+  # Activar manualmente si se necesita pipeline de content moderation
+  # ─────────────────────────────────────────────────────────────────
+  moderation:
+    description: "Clasificadores de seguridad — no son modelos de propósito general"
+    rotation_enabled: false
+    pool:
+
+      - id: groq_prompt_guard_22m
+        provider: groq
+        model_id: meta-llama/llama-prompt-guard-2-22m
+        active: false
+        tool_use: false
+        weight: 2
+        notes: "22M params — ultra rápido para detección de prompt injection"
+        limits: { rpm: 30, rpd: 14400, tpm: 15000, tpd: 500000 }
+
+      - id: groq_prompt_guard_86m
+        provider: groq
+        model_id: meta-llama/llama-prompt-guard-2-86m
+        active: false
+        tool_use: false
+        weight: 1
+        notes: "86M params — más preciso que 22m para detección de jailbreaks"
+        limits: { rpm: 30, rpd: 14400, tpm: 15000, tpd: 500000 }
+
+      - id: groq_oss_safeguard_20b
+        provider: groq
+        model_id: openai/gpt-oss-safeguard-20b
+        active: false
+        tool_use: false
+        weight: 1
+        notes: "20B safety classifier de OpenAI vía Groq"
+        limits: { rpm: 30, rpd: 1000, tpm: 8000, tpd: 200000 }

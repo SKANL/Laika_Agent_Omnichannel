@@ -63,35 +63,16 @@ def process_agentic_workflow_celery(self, payload_dict: dict):
 
 
 # ------------------------------------------
-# CRON JOB: AUTONOMÍA PROACTIVA
+# CRON JOB: AUTONOMIA PROACTIVA (HEARTBEAT)
 # ------------------------------------------
 
 @celery_app.task
 def proactive_heartbeat_trigger(reason: str):
     """
-    Llamada automáticamente por Celery Beat según el beat_schedule configurado.
-    Simula una "Auto-petición" al router para que Laika se auto-despierte e
-    indague en la DB del cliente (ej. reuniones agendadas, alertas pendientes).
-
-    En producción: iterar sobre configuraciones de tenants activos y disparar
-    invoke_agent por cada uno.
+    Llamada automaticamente por Celery Beat segun el beat_schedule configurado.
+    En produccion: iterar sobre tenants activos y disparar invoke_agent por cada uno.
     """
     logger.info("proactive_heartbeat_fired", reason=reason)
-    # Por ahora confirma recepción. En productivo se itera sobre tenants activos.
+    # TODO Fase 2: iterar sobre tenant configs activos en Postgres y despertar agentes.
     return {"status": "heartbeat_acknowledged"}
 
-# ------------------------------------------
-# CRON JOB: AUTONOMÍA PROACTIVA
-# ------------------------------------------
-
-@celery_app.task
-def proactive_heartbeat_trigger(reason: str):
-    """
-    Función llamada automáticamente por Celery Beat.
-    Simula una "Auto-petición" al router para que Laika se auto-despierte e
-    indague en la DB del cliente (Ej. Checar si hay reuniones agendadas hoy).
-    """
-    logger.info("proactive_heartbeat_fired", reason=reason)
-    # Por ahora simplemente despacha un evento mock.
-    # En productivo se iteraría sobre configuraciones de Clientes activos.
-    return {"status": "heartbeat_acknowledged"}

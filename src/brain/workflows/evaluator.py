@@ -34,18 +34,38 @@ async def evaluator_node(state: LaikaState, config: RunnableConfig) -> dict:
          return {}
     
     logger.info("evaluator_node_start", tenant=tenant_id)
-    
-    llm = get_routing_llm()
-    llm_json = llm.bind(response_format={"type": "json_object"})
-    
+
     sys_prompt = SystemMessage(content=prompts["system_prompts"]["evaluator_node"])
     # IMPORTANTE: Groq requiere que la palabra 'json' aparezca en algún mensaje
     # cuando se usa response_format={"type": "json_object"}.
     draft_eval = HumanMessage(content=f"Evalúa este borrador y responde ÚNICAMENTE en formato JSON: {draft_message.content}")
-    
-    # CRÍTICO: pasar `config` propaga los callbacks de Langfuse al LLM.
-    response = await llm_json.ainvoke([sys_prompt, draft_eval], config=config)
-    
+
+    # Selección dinámica del modelo con rotación automática en 429
+    from src.brain.rate_limiter import set_model_cooldown as _cooldown
+    response = None
+    for _attempt in range(3):
+        llm = await get_routing_llm()
+        llm_json = llm.bind(response_format={"type": "json_object"})
+        _model_id = getattr(llm, "_laika_model_id", "unknown")
+        try:
+            # CRÍTICO: pasar `config` propaga los callbacks de Langfuse al LLM.
+            response = await llm_json.ainvoke(
+                [sys_prompt, draft_eval], config=config
+            )
+            break
+        except Exception as _exc:
+            _err = str(_exc).lower()
+            if "429" in _err or "rate_limit" in _err or "rate limit" in _err:
+                logger.warning("evaluator_429_cooldown",
+                               model=_model_id, attempt=_attempt + 1)
+                await _cooldown(_model_id, seconds=60)
+                if _attempt < 2:
+                    continue
+            raise
+
+    if response is None:
+        raise RuntimeError("Todos los modelos de routing agotados en evaluator")
+
     try:
         data = json.loads(response.content)
         status = data.get("status", "rejected")
@@ -57,22 +77,48 @@ async def evaluator_node(state: LaikaState, config: RunnableConfig) -> dict:
         # El CallbackHandler activo en este contexto de LangChain permite
         # obtener el trace_id del grafo actual para asociar el score.
         _register_evaluator_score(status, reason, tenant_id, config)
-        
+
         if status == "rejected":
-            logger.warning("evaluator_rejected_draft", reason=reason, tenant=tenant_id)
+            current_retry = state.get("retry_count", 0)
+            logger.warning("evaluator_rejected_draft",
+                           reason=reason, tenant=tenant_id, retry_count=current_retry)
+
+            # Inyectar la critica como HumanMessage para que el orquestador la lea
+            # en el proximo intento y corrija exactamente lo que falla.
             return {
                 "messages": [
-                    AIMessage(content=f"Crítica interna: El sistema detuvo este envío porque falló reglas de negocio. Razón: {reason}. Por favor reescribe la respuesta corrigiéndolo.")
-                ]
+                    AIMessage(
+                        content=f"[CRITICA INTERNA - NO ENVIAR AL USUARIO] "
+                                f"Borrador rechazado. Razon: {reason}. "
+                                "Por favor genera una respuesta corregida."
+                    )
+                ],
+                "retry_count": current_retry + 1,
+                "last_eval_approved": False,
             }
         else:
             logger.info("evaluator_approved_draft", tenant=tenant_id)
-            return {}
+            return {"last_eval_approved": True}
 
     except Exception as e:
         logger.error("evaluator_error_fallback", error=str(e), tenant=tenant_id)
-        # Ante duda del evaluador (errores JSON), aprobamos ciegamente
-        return {}
+        # Ante duda del evaluador (errores JSON), aprobamos para no bloquear el flujo
+        return {"last_eval_approved": True}
+
+
+def route_after_evaluator(state: LaikaState) -> str:
+    """
+    Borde condicional post-evaluator.
+    Si el borrador fue rechazado Y aun quedan reintentos -> volver al orquestador.
+    Si fue aprobado O se agotaron los reintentos -> terminar.
+    """
+    MAX_RETRIES = 2
+    approved = state.get("last_eval_approved", True)
+    retry_count = state.get("retry_count", 0)
+
+    if not approved and retry_count <= MAX_RETRIES:
+        return "retry_orchestrator"
+    return "done"
 
 
 def _register_evaluator_score(status: str, reason: str, tenant_id: str, config: RunnableConfig) -> None:

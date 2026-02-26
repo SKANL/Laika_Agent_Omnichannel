@@ -31,14 +31,26 @@ async def router_node(state: LaikaState, config: RunnableConfig) -> dict:
     # 1. Preparamos el Prompt de Routing 
     system_prompt = SystemMessage(content=prompts["system_prompts"]["router_node"])
     
-    # 2. Invocamos al Tier 2 (Groq/Velocista) pidiendo explícitamente JSON Mode
-    llm = get_routing_llm()
-    # Forzamos JSON en el Output
-    llm_json = llm.bind(response_format={"type": "json_object"})
-
-    # CRÍTICO: pasar `config` propaga los callbacks de Langfuse al LLM.
-    # Sin esto, las llamadas al LLM no aparecen como spans en el dashboard.
-    response = await llm_json.ainvoke([system_prompt, last_message], config=config)
+    # 2. Invocamos al Tier 2 (Velocista) con rotación automática en 429
+    from src.brain.rate_limiter import set_model_cooldown as _cooldown
+    response = None
+    for _attempt in range(3):
+        llm = await get_routing_llm()
+        llm_json = llm.bind(response_format={"type": "json_object"})
+        _mid = getattr(llm, "_laika_model_id", "unknown")
+        try:
+            response = await llm_json.ainvoke([system_prompt, last_message], config=config)
+            break
+        except Exception as _exc:
+            _err = str(_exc).lower()
+            if "429" in _err or "rate_limit" in _err or "rate limit" in _err:
+                logger.warning("router_429_cooldown", model=_mid, attempt=_attempt + 1)
+                await _cooldown(_mid, seconds=60)
+                if _attempt < 2:
+                    continue
+            raise
+    if response is None:
+        raise RuntimeError("Todos los modelos de routing agotados en router_node")
     
     try:
         data = json.loads(response.content)

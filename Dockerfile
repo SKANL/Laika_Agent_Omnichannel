@@ -22,9 +22,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copiar requirements y compilar en el venv aisaldo
+# Copiar requirements y compilar en el venv aislado
 COPY requirements.txt .
+# Instalar torch CPU ANTES del resto para evitar que PyPI resuelva la variante CUDA
+# torch CPU (linux/amd64) pesa ~200 MB vs ~4 GB de la variante CUDA por defecto
 RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+        torch torchvision torchaudio \
+        --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -r requirements.txt
 
 

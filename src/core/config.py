@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     N8N_WEBHOOK_URL: HttpUrl = Field(default="http://localhost:5678/")
     N8N_API_KEY: SecretStr = Field(default="", description="Token para autenticarse contra el API/Webhook de n8n")
 
+    # 6. Web Search (Tavily)
+    TAVILY_API_KEY: SecretStr = Field(default="", description="API Key para búsquedas web en tiempo real via Tavily")
+
     @property
     def sync_database_url(self) -> str:
         """Driver síncrono para LangGraph PostgresSaver base (si llegara a ocuparse)"""
