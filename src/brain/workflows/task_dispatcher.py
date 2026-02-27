@@ -32,7 +32,12 @@ async def task_dispatcher_node(state: LaikaState, config: RunnableConfig) -> dic
     """
     configurable = config.get("configurable", {})
     tenant_id = configurable.get("tenant_id", "unknown")
-    thread_id = configurable.get("thread_id", "unknown")
+
+    # Leer raw_thread_id — el thread original del usuario tal como llegó desde n8n.
+    # NUNCA leer configurable["thread_id"] aqui: ese valor está namespaceado con el
+    # tenant prefix ("tenant_id::thread_id") para el checkpointer de Postgres y NO
+    # es un identificador válido para Celery ni para Telegram/WhatsApp.
+    thread_id = configurable.get("raw_thread_id") or configurable.get("thread_id", "unknown")
 
     # Extraer el último mensaje del usuario como descripción de la tarea
     last_human_msg = ""

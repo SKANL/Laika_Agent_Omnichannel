@@ -168,7 +168,7 @@ def run_long_background_task(self, tenant_id: str, thread_id: str, user_request:
         try:
             await invoke_agent(
                 tenant_id=tenant_id,
-                thread_id=bg_thread_id,
+                thread_id=bg_thread_id,        # checkpointer usa namespace aislado
                 payload_msg=user_request,
                 channel="background",
                 extra_metadata={
@@ -176,6 +176,7 @@ def run_long_background_task(self, tenant_id: str, thread_id: str, user_request:
                     "original_thread": thread_id,
                     "celery_task_id": self.request.id,
                 },
+                reply_thread_id=thread_id,     # respuesta → thread ORIGINAL del usuario
             )
             logger.info("long_task_invoke_complete", tenant=tenant_id)
         except Exception as exc:

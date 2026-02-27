@@ -68,10 +68,33 @@ def _route_after_moderation(state: LaikaState) -> str:
     return "router"
 
 
+# Canales internos que nunca deben generar nuevas tareas background.
+# Si se permitiera, run_long_background_task → invoke_agent → tarea_larga → run_long_background_task
+# formaría un bucle infinito de tareas Celery auto-replicantes.
+_INTERNAL_CHANNELS: frozenset[str] = frozenset({"background", "heartbeat"})
+
+
 def _should_route_intent(state: LaikaState) -> str:
     """Post-router: desviar trivialidades a casual, aclaraciones a clarification,
-    tareas largas a task_dispatcher, investigaciones al planner, resto al orquestador."""
+    tareas largas a task_dispatcher, investigaciones al planner, resto al orquestador.
+
+    GUARD DE RECURSIÓN (defensa en profundidad):
+    Si el canal es interno ('background', 'heartbeat'), forzar orquestador aunque
+    el LLM haya clasificado 'tarea_larga'. Esto previene bucles infinitos de tareas
+    Celery incluso si el guard del router_node falla por cualquier motivo.
+    """
     intent = state.get("current_intent", "")
+    channel = (state.get("channel") or "unknown").lower()
+
+    # Prevención de recursión: canal interno nunca puede despachar más background tasks
+    if channel in _INTERNAL_CHANNELS and intent == "tarea_larga":
+        logger.warning(
+            "background_recursion_prevented_in_router",
+            channel=channel,
+            original_intent=intent,
+        )
+        intent = "investigacion_complex"
+
     if intent == "casual":
         return "casual"
     if intent == "ambiguous":
@@ -169,9 +192,23 @@ async def invoke_agent(
     payload_msg: str,
     channel: str = "unknown",
     extra_metadata: dict | None = None,
+    reply_thread_id: str | None = None,
 ) -> None:
     """
     Punto de entrada para Celery workers y FastAPI backgrounds tasks.
+
+    Parámetros:
+      tenant_id       — identificador del tenant.
+      thread_id       — thread de conversación. Usado como base del namespace
+                        del checkpointer (tenant_id::thread_id). NO confundir con
+                        el chat ID de Telegram ni el ID de canal externo.
+      payload_msg     — mensaje del usuario a procesar.
+      channel         — canal de origen ('telegram', 'background', 'heartbeat', etc.).
+      extra_metadata  — metadatos adicionales para Langfuse.
+      reply_thread_id — (opcional) thread al que despachar la respuesta final en n8n.
+                        Si se omite, se usa `thread_id`. Las tareas background deben
+                        pasar aquí el thread ORIGINAL del usuario para que el reply
+                        llegue al canal correcto (no al thread de work aislado).
 
     Ciclo completo:
       0. Semantic cache check — si acierta, responde directo sin tocar el grafo.
@@ -182,9 +219,11 @@ async def invoke_agent(
          Si no hay interrupt → invoca con el input_state completo.
       5. Extrae formatted_response de state o último AIMessage como fallback.
       6. Almacena la respuesta en semantic cache para futuros aciertos.
-      7. Despacha la respuesta al webhook de reply en n8n.
+      7. Despacha la respuesta al webhook de reply en n8n usando reply_thread_id.
       8. Flush explicito de Langfuse para garantizar envio de spans en workers cortos.
     """
+    # thread al que dirigir la respuesta: por defecto el mismo thread de entrada.
+    effective_reply_thread_id = reply_thread_id or thread_id
     # ------------------------------------------------------------------
     # 0. SEMANTIC CACHE — cortocircuito previo al grafo (0 costo LLM)
     # ------------------------------------------------------------------
@@ -197,7 +236,7 @@ async def invoke_agent(
 
         if cached:
             logger.info("semantic_cache_shortcut", tenant=tenant_id, thread=thread_id)
-            await _dispatch_reply(tenant_id, thread_id, cached)
+            await _dispatch_reply(tenant_id, effective_reply_thread_id, cached)
             return
     except Exception as e:
         logger.warning("semantic_cache_check_failed", error=str(e), tenant=tenant_id)
@@ -242,10 +281,19 @@ async def invoke_agent(
 
     # ------------------------------------------------------------------
     # 3. Config de LangGraph: thread_id para Checkpointer + tenant_id en configurable
+    #
+    # IMPORTANTE — dos IDs distintos con propósitos distintos:
+    #   configurable["thread_id"]     → namespace completo para el checkpointer de Postgres.
+    #                                    Formato: "tenant_id::thread_id" (garantiza aislamiento
+    #                                    entre tenants aunque compartan thread_id numérico).
+    #   configurable["raw_thread_id"] → thread_id original tal como llegó desde n8n/webhook.
+    #                                    Los nodos del grafo (ej. task_dispatcher) deben leer
+    #                                    ÉSTE para pasar a Celery, no el namespaceado.
     # ------------------------------------------------------------------
     config = {
         "configurable": {
-            "thread_id": f"{tenant_id}::{thread_id}",
+            "thread_id": f"{tenant_id}::{thread_id}",  # para AsyncPostgresSaver
+            "raw_thread_id": thread_id,                 # para nodos que necesitan el ID original
             "tenant_id": tenant_id,
             "channel": channel,
             # Datos del tenant inyectados aquí (nunca en el estado visible al LLM)
@@ -355,7 +403,13 @@ async def invoke_agent(
                 from src.brain.llm_proxy import register_trace_score
                 register_trace_score("runtime_error", 1.0, langfuse_handler,
                                      comment=f"{type(e).__name__}: {str(e)}")
-            logger.exception("agent_runtime_failed", error=str(e), tenant=tenant_id)
+            logger.exception(
+                "agent_runtime_failed",
+                error=str(e),
+                tenant=tenant_id,
+                thread=thread_id,
+                reply_thread=effective_reply_thread_id,
+            )
             raise
 
         finally:
@@ -378,8 +432,11 @@ async def invoke_agent(
 
     # ------------------------------------------------------------------
     # 6. Despachar respuesta al webhook de n8n
+    #    Usamos effective_reply_thread_id: si la tarea es un background task,
+    #    éste apunta al thread ORIGINAL del usuario (no al thread de trabajo aislado),
+    #    garantizando que el webhook de n8n resuelva el chatId correcto en Telegram.
     # ------------------------------------------------------------------
-    await _dispatch_reply(tenant_id, thread_id, response_text)
+    await _dispatch_reply(tenant_id, effective_reply_thread_id, response_text)
 
 
 

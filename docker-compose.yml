@@ -9,8 +9,8 @@
 x-langfuse-common-env: &langfuse-common-env
   DATABASE_URL: postgresql://${POSTGRES_USER:-laika_admin}:${POSTGRES_PASSWORD:-laika_secure_pass_2026}@postgres:5432/${POSTGRES_DB:-laika_db}
   NEXTAUTH_URL: ${LANGFUSE_BASE_URL:-http://localhost:3000}
-  NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-super_secret_nextauth_signing_key_2026}
-  SALT: ${LANGFUSE_SALT:-super_secret_salt_for_passwords_2026}
+  NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-secreto_de_32_bytes_minimo_para_langfuse}
+  SALT: ${LANGFUSE_SALT:-sal_criptografica_fuerte}
   ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
   TELEMETRY_ENABLED: "false"
   LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
@@ -191,6 +191,8 @@ services:
     depends_on: *langfuse-depends
     ports:
       - "3000:3000"
+    env_file:
+      - .env.local
     environment:
       <<: *langfuse-common-env
 
@@ -207,6 +209,8 @@ services:
     depends_on: *langfuse-depends
     ports:
       - "3030:3030"
+    env_file:
+      - .env.local
     environment:
       <<: *langfuse-common-env
 
@@ -219,14 +223,24 @@ services:
     restart: unless-stopped
     ports:
       - "5678:5678"
+    # env_file asegura que N8N_WEBHOOK_URL (ngrok HTTPS) llegue al contenedor.
+    # Sin esto, la interpolación ${N8N_WEBHOOK_URL} solo lee .env (no .env.local)
+    # y n8n registra los webhooks de Telegram con http://localhost:5678/ -> error.
+    env_file:
+      - .env.local
     environment:
-      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_HOST=0.0.0.0
       - N8N_PORT=5678
-      - N8N_PROTOCOL=http
+      - N8N_PROTOCOL=https
       - NODE_ENV=production
-      - WEBHOOK_URL=${N8N_WEBHOOK_URL:-http://localhost:5678/}
+      # WEBHOOK_URL viene de .env.local via env_file (WEBHOOK_URL=<ngrok_url>).
+      # NO usar ${N8N_WEBHOOK_URL} aqui: la interpolacion YAML lee .env (no .env.local)
+      # y environment: tiene precedencia sobre env_file, dejando WEBHOOK_URL vacio.
       - GENERIC_TIMEZONE=${TIMEZONE:-America/Mexico_City}
-      - N8N_TRUST_PROXIES=true
+      # N8N_PROXY_HOPS=1 le indica a n8n (Express) que confíe en 1 proxy delante (ngrok).
+      # Sin esto, express-rate-limit lanza ERR_ERL_UNEXPECTED_X_FORWARDED_FOR porque
+      # recibe el header X-Forwarded-For pero trust proxy está en false (default).
+      - N8N_PROXY_HOPS=1
     volumes:
       - n8n_data:/home/node/.n8n
 
@@ -331,7 +345,9 @@ services:
         condition: service_completed_successfully
     environment:
       <<: *laika-app-env
-      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://n8n:5678/}
+      # N8N_WEBHOOK_URL viene de .env.local via env_file.
+      # NO redefinir aqui con ${} — la interpolacion YAML no lee .env.local
+      # y environment: pisaria el valor correcto de env_file con el default HTTP.
     env_file:
       - .env.local
     volumes:

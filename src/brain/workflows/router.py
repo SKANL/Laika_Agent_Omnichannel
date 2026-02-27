@@ -7,6 +7,11 @@ from src.core.state import LaikaState
 from src.brain.llm_proxy import get_routing_llm, register_trace_score
 from structlog import get_logger
 
+# Canales internos que nunca deben generar nuevas tareas background.
+# Prima de seguridad: se define tambien en main_graph._should_route_intent
+# como segunda linea de defensa.
+_INTERNAL_CHANNELS: frozenset[str] = frozenset({"background", "heartbeat"})
+
 logger = get_logger("laika_router")
 
 # Path absoluto: funciona independientemente del directorio de trabajo (uvicorn o celery)
@@ -83,6 +88,24 @@ async def router_node(state: LaikaState, config: RunnableConfig) -> dict:
                     active_intents=active_intents,
                 )
                 intent = "casual"
+
+        # ================================================================
+        # GUARD DE CANAL INTERNO — previene recursion infinita.
+        # Si el canal es 'background' o 'heartbeat' (tarea ya en Celery),
+        # nunca despachar otra background task. El LLM puede reclasificar
+        # el mensaje original como 'tarea_larga' aunque ya estemos en una;
+        # esta regla determinista lo corta antes de que llegue al grafo.
+        # Segunda linea de defensa: main_graph._should_route_intent.
+        # ================================================================
+        channel = configurable.get("channel", "unknown")
+        if channel in _INTERNAL_CHANNELS and intent == "tarea_larga":
+            logger.warning(
+                "background_tarea_larga_redirected",
+                tenant=tenant_id,
+                channel=channel,
+                original_intent=intent,
+            )
+            intent = "investigacion_complex"
 
         logger.info("router_classification_done", intent=intent, tenant=tenant_id)
 

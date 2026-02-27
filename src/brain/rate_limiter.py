@@ -64,18 +64,45 @@ def _load_model_limits() -> dict:
 _MODEL_LIMITS: dict = _load_model_limits()
 
 _redis_client: Optional[aioredis.Redis] = None
+# id() del event loop en el que se créo _redis_client.
+# Cada asyncio.run() en Celery workers crea un loop nuevo; si cambia,
+# el cliente acumula sockets/handles del loop cerrado y lanza
+# "Event loop is closed" al intentar usarlos.
+_redis_loop_id: Optional[int] = None
 
 
 def get_redis_client() -> aioredis.Redis:
-    """Singleton del cliente Redis asíncrono."""
-    global _redis_client
-    if _redis_client is None:
+    """Singleton del cliente Redis asincrono, loop-aware.
+
+    Celery workers ejecutan cada tarea via asyncio.run(), que crea y destruye
+    un event loop por invocacion. Si reutilizamos el cliente ligado al loop
+    anterior (ya cerrado), obtenemos 'Event loop is closed' en cualquier await.
+
+    Solucion: rastrear el id() del loop con el que se creo el cliente y
+    reconstruirlo cuando detectamos que el loop activo es distinto.
+    aioredis.from_url() es lazy (no abre sockets hasta el primer await),
+    por lo que la reconstruccion es O(1) sin I/O bloqueante.
+    """
+    global _redis_client, _redis_loop_id
+
+    try:
+        current_loop_id = id(asyncio.get_running_loop())
+    except RuntimeError:
+        # Llamado fuera de un contexto async (ej. en startup sincrono).
+        # No hay loop activo; si el cliente existe, lo devolvemos tal cual.
+        # Se reconstruira en la primera llamada dentro de un asyncio.run().
+        current_loop_id = None
+
+    if _redis_client is None or (current_loop_id is not None and _redis_loop_id != current_loop_id):
         from src.core.config import settings
         _redis_client = aioredis.from_url(
             settings.REDIS_URL,
             encoding="utf-8",
             decode_responses=True,
         )
+        _redis_loop_id = current_loop_id
+        logger.debug("redis_client_recreated", loop_id=current_loop_id)
+
     return _redis_client
 
 

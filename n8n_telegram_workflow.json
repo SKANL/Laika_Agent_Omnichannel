@@ -1,102 +1,271 @@
 {
-  "name": "Laika Telegram Bot (B2B Async)",
+  "name": "Laika Telegram Bot (B2B Async) — Full Test",
+
+  "_readme": [
+    "SETUP REQUERIDO (una sola vez):",
+    "1. En n8n Settings > Variables, crea estas dos variables:",
+    "   - LAIKA_JWT_TOKEN  → token JWT del tenant.",
+    "     Generar: docker exec laika_api python -c \"from src.core.security import generate_dev_token; print(generate_dev_token('telegram_default'))\"",
+    "   - LAIKA_TENANT_ID  → identificador del tenant (ej: telegram_default)",
+    "2. Asigna tus credenciales de Telegram en todos los nodos que digan YOUR_TELEGRAM_CREDENTIALS_ID.",
+    "3. Activa el workflow (toggle Publish).",
+    "4. El webhook de reply esta en: POST /webhook/laika-telegram-reply",
+    "NOTA: WEBHOOK_URL de n8n debe ser la URL publica de ngrok (HTTPS). Se configura via N8N_WEBHOOK_URL en .env.local."
+  ],
+
   "nodes": [
+
     {
       "parameters": {
         "updates": ["message"]
       },
-      "id": "e98e207b-8b9a-4c9f-8a1a-3e8f8b8e8b8e",
+      "id": "aa000001-0000-0000-0000-000000000001",
       "name": "Telegram Trigger",
       "type": "n8n-nodes-base.telegramTrigger",
-      "typeVersion": 1,
-      "position": [200, 200],
+      "typeVersion": 1.1,
+      "position": [200, 280],
       "credentials": {
-        "telegramApi": {
-          "id": "YOUR_TELEGRAM_CREDENTIALS_ID"
-        }
+        "telegramApi": { "id": "YOUR_TELEGRAM_CREDENTIALS_ID" }
       }
     },
+
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false, "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "cond-has-text",
+              "leftValue": "={{ $json.message.text }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "exists", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "aa000002-0000-0000-0000-000000000002",
+      "name": "\u00bfTiene texto?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [420, 280]
+    },
+
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendChatAction",
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "action": "typing"
+      },
+      "id": "aa000003-0000-0000-0000-000000000003",
+      "name": "Enviar Typing",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [640, 180],
+      "credentials": {
+        "telegramApi": { "id": "YOUR_TELEGRAM_CREDENTIALS_ID" }
+      }
+    },
+
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// TENANT_ID: configura la variable LAIKA_TENANT_ID en n8n Settings > Variables.\n// Nunca hardcodear el tenant_id aqui.\nconst TENANT_ID = $env.LAIKA_TENANT_ID;\nif (!TENANT_ID) throw new Error('Variable LAIKA_TENANT_ID no configurada en n8n Settings > Variables');\n\nconst trigger = $('Telegram Trigger').item.json;\nconst msg     = trigger.message;\nconst from    = msg.from || {};\nconst chat    = msg.chat || {};\n\n// thread_id con prefijo 'tg_' para aislar sesiones por canal\nconst threadId = `tg_${chat.id}`;\n\nconst userName = [from.first_name, from.last_name]\n  .filter(Boolean).join(' ') || 'Usuario';\n\nreturn [{\n  json: {\n    tenant_id:  TENANT_ID,\n    thread_id:  threadId,\n    channel:    'telegram',\n    user_query: msg.text,\n    metadata: {\n      telegram_user_id: from.id,\n      user_name:        userName,\n      username:         from.username ? `@${from.username}` : 'sin_username',\n      language_code:    from.language_code || 'es',\n      chat_type:        chat.type,\n      message_id:       msg.message_id,\n      chat_id:          chat.id,\n      is_bot:           from.is_bot || false,\n      n8n_execution_id: $execution.id\n    }\n  }\n}];"
+      },
+      "id": "aa000004-0000-0000-0000-000000000004",
+      "name": "Construir Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 180]
+    },
+
     {
       "parameters": {
         "method": "POST",
         "url": "http://laika_api:8000/v1/hooks/n8n",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"tenant_id\": \"telegram_user_default\",\n  \"thread_id\": \"{{ $node[\"Telegram Trigger\"].json[\"message\"][\"chat\"][\"id\"] }}\",\n  \"channel\": \"telegram\",\n  \"user_query\": \"{{ $node[\"Telegram Trigger\"].json[\"message\"][\"text\"] }}\",\n  \"metadata\": {\n    \"user_name\": \"{{ $node[\"Telegram Trigger\"].json[\"message\"][\"from\"][\"first_name\"] }}\"\n  }\n}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{ $env.LAIKA_JWT_TOKEN }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
+            { "name": "Authorization", "value": "=Bearer {{ $env.LAIKA_JWT_TOKEN }}" },
+            { "name": "Content-Type",  "value": "application/json" }
           ]
         },
-        "options": {}
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 15000,
+          "response": {
+            "response": { "fullResponse": true, "responseFormat": "json" }
+          }
+        }
       },
-      "id": "d1a1a1a1-b1b1-c1c1-d1d1-e1e1e1e1e1e1",
-      "name": "Send to Laika API",
+      "id": "aa000005-0000-0000-0000-000000000005",
+      "name": "Enviar a Laika API",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.1,
-      "position": [450, 200]
+      "typeVersion": 4.2,
+      "position": [1080, 180]
     },
+
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "=\uD83E\uDD16 *Laika est\u00e1 procesando tu solicitud...*\n\nResponder\u00e9 en breve.",
+        "additionalFields": {
+          "parseMode": "Markdown",
+          "replyToMessageId": "={{ $('Telegram Trigger').item.json.message.message_id }}"
+        }
+      },
+      "id": "aa000006-0000-0000-0000-000000000006",
+      "name": "ACK al Usuario",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1300, 180],
+      "credentials": {
+        "telegramApi": { "id": "YOUR_TELEGRAM_CREDENTIALS_ID" }
+      }
+    },
+
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "\u26a0\ufe0f Solo proceso mensajes de *texto* por ahora.\n\nEnv\u00eda tu consulta como texto y te respondo enseguida.",
+        "additionalFields": {
+          "parseMode": "Markdown",
+          "replyToMessageId": "={{ $('Telegram Trigger').item.json.message.message_id }}"
+        }
+      },
+      "id": "aa000007-0000-0000-0000-000000000007",
+      "name": "Mensaje No Soportado",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [640, 420],
+      "credentials": {
+        "telegramApi": { "id": "YOUR_TELEGRAM_CREDENTIALS_ID" }
+      }
+    },
+
     {
       "parameters": {
         "httpMethod": "POST",
         "path": "laika-telegram-reply",
+        "responseMode": "responseNode",
         "options": {}
       },
-      "id": "f2f2f2f2-a2a2-b2b2-c2c2-d2d2d2d2d2d2",
+      "id": "aa000008-0000-0000-0000-000000000008",
       "name": "Laika Reply Webhook",
       "type": "n8n-nodes-base.webhook",
-      "typeVersion": 1,
-      "position": [200, 450],
+      "typeVersion": 2,
+      "position": [200, 620],
       "webhookId": "laika-telegram-reply"
     },
+
     {
       "parameters": {
-        "chatId": "={{ $node[\"Laika Reply Webhook\"].json[\"body\"][\"thread_id\"] }}",
-        "text": "={{ $node[\"Laika Reply Webhook\"].json[\"body\"][\"response\"] }}",
-        "options": {}
+        "respondWith": "text",
+        "responseBody": "OK",
+        "options": { "responseCode": 200 }
       },
-      "id": "c3c3c3c3-d3d3-e3e3-f3f3-a3a3a3a3a3a3",
-      "name": "Reply to Telegram",
-      "type": "n8n-nodes-base.telegram",
+      "id": "aa000009-0000-0000-0000-000000000009",
+      "name": "Responder 200 a Laika",
+      "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [450, 450],
-      "credentials": {
-        "telegramApi": {
-          "id": "YOUR_TELEGRAM_CREDENTIALS_ID"
+      "position": [420, 520]
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false, "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "cond-resp-exists",
+              "leftValue":  "={{ $json.body.response }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
         }
+      },
+      "id": "aa000010-0000-0000-0000-000000000010",
+      "name": "\u00bfRespuesta v\u00e1lida?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [420, 720]
+    },
+
+    {
+      "parameters": {
+        "chatId": "={{ $json.body.thread_id.replace('tg_', '') }}",
+        "text": "={{ $json.body.response }}",
+        "additionalFields": { "parseMode": "Markdown" }
+      },
+      "id": "aa000011-0000-0000-0000-000000000011",
+      "name": "Enviar Respuesta",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [640, 680],
+      "credentials": {
+        "telegramApi": { "id": "YOUR_TELEGRAM_CREDENTIALS_ID" }
+      }
+    },
+
+    {
+      "parameters": {
+        "chatId": "={{ $json.body.thread_id.replace('tg_', '') }}",
+        "text": "\u274c Hubo un error procesando tu solicitud. Por favor intenta de nuevo en unos momentos.",
+        "additionalFields": { "parseMode": "Markdown" }
+      },
+      "id": "aa000012-0000-0000-0000-000000000012",
+      "name": "Error al Usuario",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [640, 860],
+      "credentials": {
+        "telegramApi": { "id": "YOUR_TELEGRAM_CREDENTIALS_ID" }
       }
     }
+
   ],
+
   "connections": {
     "Telegram Trigger": {
+      "main": [[ { "node": "\u00bfTiene texto?", "type": "main", "index": 0 } ]]
+    },
+    "\u00bfTiene texto?": {
       "main": [
-        [
-          {
-            "node": "Send to Laika API",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [ { "node": "Enviar Typing",        "type": "main", "index": 0 } ],
+        [ { "node": "Mensaje No Soportado", "type": "main", "index": 0 } ]
       ]
     },
+    "Enviar Typing": {
+      "main": [[ { "node": "Construir Payload", "type": "main", "index": 0 } ]]
+    },
+    "Construir Payload": {
+      "main": [[ { "node": "Enviar a Laika API", "type": "main", "index": 0 } ]]
+    },
+    "Enviar a Laika API": {
+      "main": [[ { "node": "ACK al Usuario", "type": "main", "index": 0 } ]]
+    },
     "Laika Reply Webhook": {
+      "main": [[
+        { "node": "Responder 200 a Laika", "type": "main", "index": 0 },
+        { "node": "\u00bfRespuesta v\u00e1lida?",   "type": "main", "index": 0 }
+      ]]
+    },
+    "\u00bfRespuesta v\u00e1lida?": {
       "main": [
-        [
-          {
-            "node": "Reply to Telegram",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [ { "node": "Enviar Respuesta", "type": "main", "index": 0 } ],
+        [ { "node": "Error al Usuario", "type": "main", "index": 0 } ]
       ]
     }
+  },
+
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
   }
 }
