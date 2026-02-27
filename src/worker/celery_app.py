@@ -1,9 +1,33 @@
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_process_init
 from src.core.config import settings
 from structlog import get_logger
 
 logger = get_logger("laika_celery_worker")
+
+# ------------------------------------------
+# POST-FORK: RESET DEL MODELO DE EMBEDDINGS
+# ------------------------------------------
+# En Linux, Celery usa prefork workers (fork()). El proceso hijo hereda
+# el estado del padre incluyendo el contexto CUDA del modelo de embeddings.
+# Esto causa errores de CUDA en workers concurrentes con GPU.
+# Solucion: resetear la instancia del modelo en cada worker hijo antes
+# de que procese cualquier tarea, forzando re-inicializacion limpia.
+@worker_process_init.connect
+def reset_embedding_model_on_fork(**kwargs):
+    """
+    Restablece el modelo de embeddings tras fork() de Celery worker.
+    Solo relevante en Linux/macOS con modelos GPU (CUDA/MPS).
+    En Windows (spawn, no fork) esta signal igual se dispara pero es inocuo.
+    """
+    try:
+        import src.brain.embeddings as _emb
+        _emb._model_instance = None
+        logger.info("embedding_model_reset_on_fork")
+    except Exception as e:
+        logger.warning("embedding_model_reset_failed", error=str(e))
+
 
 # ==========================================
 # GESTOR DE TRABAJOS EN SEGUNDO PLANO (REDIS)

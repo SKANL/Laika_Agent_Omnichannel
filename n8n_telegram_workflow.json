@@ -23,6 +23,19 @@
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={\n  \"tenant_id\": \"telegram_user_default\",\n  \"thread_id\": \"{{ $node[\"Telegram Trigger\"].json[\"message\"][\"chat\"][\"id\"] }}\",\n  \"channel\": \"telegram\",\n  \"user_query\": \"{{ $node[\"Telegram Trigger\"].json[\"message\"][\"text\"] }}\",\n  \"metadata\": {\n    \"user_name\": \"{{ $node[\"Telegram Trigger\"].json[\"message\"][\"from\"][\"first_name\"] }}\"\n  }\n}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.LAIKA_JWT_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
         "options": {}
       },
       "id": "d1a1a1a1-b1b1-c1c1-d1d1-e1e1e1e1e1e1",

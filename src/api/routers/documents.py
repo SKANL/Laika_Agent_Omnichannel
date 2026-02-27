@@ -12,6 +12,7 @@ from fastapi import APIRouter, status, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from structlog import get_logger
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.core.db import AsyncSessionLocal, RAGDocument
 from src.core.security import verify_token
@@ -22,6 +23,14 @@ router = APIRouter(prefix="/v1/documents", tags=["Document Ingestion"])
 # Tamano maximo de chunk en caracteres (~300 palabras)
 _CHUNK_SIZE = 1000
 _CHUNK_OVERLAP = 100
+
+# RecursiveCharacterTextSplitter: divide respetando párrafos, frases y palabras.
+# Reemplaza el splitter artesanal; produce chunks más coherentes semánticamente.
+_text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=_CHUNK_SIZE,
+    chunk_overlap=_CHUNK_OVERLAP,
+    separators=["\n\n", "\n", ". ", " ", ""],
+)
 
 
 # --- Schemas ---
@@ -39,31 +48,6 @@ class IngestResponse(BaseModel):
     message: str
 
 
-# --- Chunking simple (Fase 1: sin LangChain TextSplitter) ---
-def _split_into_chunks(text: str, chunk_size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVERLAP) -> List[str]:
-    """
-    Divide el texto en chunks con overlap para evitar cortar contextos importantes.
-    En Fase 2: reemplazar con RecursiveCharacterTextSplitter de LangChain.
-    """
-    if len(text) <= chunk_size:
-        return [text]
-
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = min(start + chunk_size, len(text))
-        # Intentar cortar en un punto o salto de linea para no partir palabras
-        if end < len(text):
-            cut = text.rfind("\n", start, end)
-            if cut == -1:
-                cut = text.rfind(". ", start, end)
-            if cut != -1:
-                end = cut + 1
-        chunks.append(text[start:end].strip())
-        start = end - overlap
-
-    return [c for c in chunks if c]
-
 
 @router.post("/ingest", response_model=IngestResponse, status_code=status.HTTP_201_CREATED)
 async def ingest_document(
@@ -75,9 +59,10 @@ async def ingest_document(
 
     Flujo:
     1. Autentica via JWT (verify_token).
-    2. Divide el texto en chunks solapados.
-    3. Genera embeddings con SentenceTransformers (GPU T-1000 en dev).
-    4. Inserta en rag_documents con tenant_id para RLS.
+    2. Verifica cross-tenant: el JWT debe pertenecer al mismo tenant del payload.
+    3. Divide el texto en chunks con RecursiveCharacterTextSplitter (LangChain).
+    4. Genera embeddings con SentenceTransformers (GPU T-1000 en dev).
+    5. Inserta en rag_documents con tenant_id para RLS.
 
     Ejemplo de uso:
         curl -X POST /v1/documents/ingest \\
@@ -87,10 +72,23 @@ async def ingest_document(
     """
     from src.brain.embeddings import encode_text
 
+    # --- GUARDA CROSS-TENANT ---
+    jwt_tenant = claims.get("tenant_id")
+    if jwt_tenant and jwt_tenant != req.tenant_id:
+        logger.warning(
+            "cross_tenant_document_attempt",
+            jwt_tenant=jwt_tenant,
+            req_tenant=req.tenant_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="El tenant_id del token no coincide con el del documento.",
+        )
+
     logger.info("document_ingest_start", tenant=req.tenant_id,
                 source=req.source, content_len=len(req.content))
 
-    chunks = _split_into_chunks(req.content)
+    chunks = _text_splitter.split_text(req.content)
     logger.info("document_chunked", tenant=req.tenant_id, chunks=len(chunks))
 
     metadata = {"source": req.source, "tags": req.tags or []}

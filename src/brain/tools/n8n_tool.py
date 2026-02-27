@@ -1,5 +1,6 @@
 import httpx
 from langchain_core.tools import tool
+from langchain_core.runnables import RunnableConfig
 from src.core.config import settings
 from structlog import get_logger
 
@@ -10,7 +11,7 @@ logger = get_logger("laika_n8n_tools")
 # ==========================================
 
 @tool
-async def n8n_workflow_execution(workflow_id: str, action_payload: dict, tenant_id: str) -> str:
+async def n8n_workflow_execution(workflow_id: str, action_payload: dict, config: RunnableConfig) -> str:
     """
     Pide a n8n que ejecute un Workflow externo (ej. enviar email, crear CRM entry).
     Esta es la única forma en que Laika altera el mundo real.
@@ -18,8 +19,11 @@ async def n8n_workflow_execution(workflow_id: str, action_payload: dict, tenant_
     Args:
         workflow_id: El ID o slug del webhook de n8n a disparar.
         action_payload: Los datos JSON extraídos que N8N necesita para operar.
-        tenant_id: ID Mágico de la empresa que pide la acción.
     """
+    # tenant_id se inyecta via RunnableConfig por LangGraph (NO expuesto al LLM)
+    configurable = config.get("configurable", {})
+    tenant_id = configurable.get("tenant_id", "unknown")
+
     logger.info("triggering_n8n_workflow", workflow_id=workflow_id, tenant_id=tenant_id)
     
     # URL Base protegida (apuntando al container de n8n o la nube cliente)

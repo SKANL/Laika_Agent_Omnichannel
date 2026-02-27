@@ -1,3 +1,4 @@
+import os
 import yaml
 import json
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -8,8 +9,9 @@ from structlog import get_logger
 
 logger = get_logger("laika_router")
 
-# Cargamos the registry en memoria
-with open("src/config/prompts_registry.yaml", "r", encoding="utf-8") as file:
+# Path absoluto: funciona independientemente del directorio de trabajo (uvicorn o celery)
+_PROMPTS_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "config", "prompts_registry.yaml")
+with open(_PROMPTS_PATH, "r", encoding="utf-8") as file:
     prompts = yaml.safe_load(file)
 
 async def router_node(state: LaikaState, config: RunnableConfig) -> dict:
@@ -22,14 +24,23 @@ async def router_node(state: LaikaState, config: RunnableConfig) -> dict:
     tenant_id = configurable.get("tenant_id", "unknown")
     thread_id = configurable.get("thread_id", "unknown")
     
+    # Si la moderación ya clasificó el intent como 'blocked', no re-clasificamos.
+    existing_intent = state.get("current_intent", "")
+    if existing_intent == "blocked":
+        logger.info("router_skipped_already_blocked", tenant=tenant_id)
+        return {"current_intent": "blocked"}
+
     # Extraemos el último mensaje enviado por el usuario
-    # Garantizamos que sea un HumanMessage para evaluarlo
     last_message = state["messages"][-1]
     
     logger.info("router_node_start", tenant=tenant_id, thread=thread_id)
 
-    # 1. Preparamos el Prompt de Routing 
-    system_prompt = SystemMessage(content=prompts["system_prompts"]["router_node"])
+    # 1. Preparamos el Prompt de Routing — SIN backstory global para evitar
+    #    "Context Rot": el router es un clasificador puro, no necesita la persona Laika.
+    #    (Karpathy 2025 Context Engineering: inyectar backstory en cada llamada
+    #     de routing es ruido que degrada la señal de clasificación y gasta tokens.)
+    router_prompt = prompts["system_prompts"]["router_node"]
+    system_prompt = SystemMessage(content=router_prompt)
     
     # 2. Invocamos al Tier 2 (Velocista) con rotación automática en 429
     from src.brain.rate_limiter import set_model_cooldown as _cooldown
@@ -55,15 +66,45 @@ async def router_node(state: LaikaState, config: RunnableConfig) -> dict:
     try:
         data = json.loads(response.content)
         intent = data.get("intent", "casual")
+
+        # ================================================================
+        # FEATURE FLAGS: Filtrar intents según tenant_config.active_intents
+        # Si el tenant tiene una whitelist y el intent no está en ella,
+        # redirigir a casual (respuesta amigable en lugar de error).
+        # ================================================================
+        active_intents = configurable.get("active_intents")  # None = todo activo
+        blocked_intents = {"blocked", "casual", "ambiguous"}  # siempre permitidos
+        if active_intents and intent not in blocked_intents:
+            if intent not in active_intents:
+                logger.warning(
+                    "intent_blocked_by_feature_flag",
+                    intent=intent,
+                    tenant=tenant_id,
+                    active_intents=active_intents,
+                )
+                intent = "casual"
+
         logger.info("router_classification_done", intent=intent, tenant=tenant_id)
 
         # Registrar el intent como score categórico en Langfuse.
-        # Permite filtrar y agrupar traces por tipo de petición en el dashboard.
         register_trace_score("intent", intent, config, data_type="CATEGORICAL")
 
-        return {"current_intent": intent}
-        
+        # Si la petición es ambigua, extraer la pregunta sugerida
+        update: dict = {"current_intent": intent}
+        if intent == "ambiguous":
+            clarification_q = data.get(
+                "clarification_question",
+                "¿Podrías darme más detalles sobre lo que necesitas?",
+            )
+            update["extracted_entities"] = {
+                **state.get("extracted_entities", {}),
+                "clarification_question": clarification_q,
+            }
+            update["clarification_needed"] = True
+
+        return update
+
     except Exception as e:
         logger.error("router_json_parsing_failed", error=str(e), tenant=tenant_id)
-        # Fallback de seguridad: Si alucina y rompe el JSON, asumimos charla casual para no romper RAG
+        # Fallback de seguridad: Si alucina y rompe el JSON, asumimos charla casual
         return {"current_intent": "casual"}

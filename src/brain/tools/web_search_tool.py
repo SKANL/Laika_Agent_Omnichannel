@@ -36,19 +36,17 @@ async def web_search(query: str) -> str:
         if not api_key:
             return "Error: TAVILY_API_KEY no está configurada. Búsqueda web no disponible."
 
-        # Inyectamos la key en el entorno para que TavilySearchResults la capture
-        # (langchain_community lee TAVILY_API_KEY del entorno internamente)
-        os.environ["TAVILY_API_KEY"] = api_key
-
+        # Pasamos la API key directamente al constructor (no via os.environ)
+        # para evitar race conditions con workers concurrentes
         search_tool = TavilySearchResults(
             max_results=3,
-            search_depth="advanced",     # Resultados más ricos
-            include_answer=True,          # Incluir respuesta sintetizada de Tavily
+            search_depth="advanced",
+            include_answer=True,
+            tavily_api_key=api_key,
         )
 
         results = await search_tool.ainvoke(query)
 
-        # Formatear resultados para que el LLM los procese limpiamente
         if isinstance(results, list):
             formatted = "\n\n".join([
                 f"Fuente: {r.get('url', 'N/A')}\n{r.get('content', r.get('snippet', ''))}"

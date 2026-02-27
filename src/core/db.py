@@ -1,8 +1,11 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
-from sqlalchemy import Column, Integer, String, JSON
+from sqlalchemy import Column, Integer, String, Boolean, JSON, DateTime, text, func
 from pgvector.sqlalchemy import Vector
 from src.core.config import settings
+import structlog
+
+_db_logger = structlog.get_logger("laika_db")
 
 # ==========================================
 # GESTOR ASÍNCRONO DE POSTGRES & PGVECTOR
@@ -36,12 +39,16 @@ class RAGDocument(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     # 🔴 SEGURIDAD B2B: Esta columna nunca puede estar vacía.
     # Divide físicamente los clientes en la misma base de datos.
-    tenant_id = Column(String(50), nullable=False, index=True) 
-    
+    tenant_id = Column(String(50), nullable=False, index=True)
+
     content = Column(String, nullable=False)
     # Vector de embebimientos (ej. paraphrase-multilingual-MiniLM-L12-v2 da 384 dims)
     embedding = Column(Vector(384))
-    
+
+    # Origen del documento: "upload", "agent_memory:user_explicit", "agent_memory:preference", etc.
+    # Permite filtrar por tipo de memoria en búsquedas RAG.
+    source = Column(String(100), nullable=True, index=True, default="upload")
+
     metadata_json = Column(JSON, default={})
 
 class SemanticCache(Base):
@@ -59,3 +66,25 @@ class SemanticCache(Base):
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session
+
+
+async def init_db() -> None:
+    """
+    Inicializa la base de datos al arrancar la aplicación:
+      1. Activa la extensión pgvector (CREATE EXTENSION IF NOT EXISTS vector).
+      2. Crea todas las tablas SQLAlchemy con CREATE TABLE IF NOT EXISTS.
+
+    El LangGraph checkpointer (AsyncPostgresSaver.setup()) se llama por separado
+    en main_graph.invoke_agent, ya que requiere un pool psycopg nativo.
+
+    Esta función es idempotente: puede llamarse múltiples veces sin problema.
+    """
+    async with engine.begin() as conn:
+        # Activar extensión pgvector: necesaria para el tipo vector(384)
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        # Crear tablas SQLAlchemy (rag_documents, semantic_cache)
+        await conn.run_sync(Base.metadata.create_all)
+    _db_logger.info(
+        "db_initialized",
+        tables=[t.name for t in Base.metadata.sorted_tables],
+    )

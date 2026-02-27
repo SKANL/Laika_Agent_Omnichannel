@@ -55,6 +55,12 @@ COPY --from=builder /opt/venv /opt/venv
 # Copiar código fuente
 COPY ./src /app/src
 
+# Copiar archivos de migraciones Alembic
+# Necesarios tanto para el servicio db_migrate como para
+# cualquier worker que ejecute `alembic upgrade head` manualmente.
+COPY ./alembic /app/alembic
+COPY alembic.ini /app/alembic.ini
+
 # Puerto FastAPI por defecto
 EXPOSE 8000
 

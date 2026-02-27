@@ -60,3 +60,5 @@ class N8NAcceptanceResponse(BaseModel):
     message: str = "Worker has accepted the task."
     thread_id: str
     tenant_id: str
+    # ID de la tarea Celery encolada. El cliente puede consultarlo via GET /v1/jobs/{task_id}.
+    task_id: Optional[str] = None

@@ -5,8 +5,9 @@ from structlog import get_logger
 
 # Cargas Nucleares (Singleton settings e inicio de Logs)
 from src.core.config import settings
+from src.core.db import init_db
 from src.core.logging_setup import setup_logging
-from src.api.routers import webhook, documents, health
+from src.api.routers import webhook, documents, health, jobs, tenants
 
 # Arrancar logs en formato JSON para que las consolas de Docker sean legibles
 setup_logging(json_logs=True)
@@ -26,6 +27,15 @@ async def lifespan(app: FastAPI):
 
     # --- STARTUP ---
     logger.info("laika_gateway_starting", version="2.0.0", active_db=settings.POSTGRES_DB)
+
+    # 0. Inicializar tablas SQLAlchemy + extensión pgvector
+    # Importar modelos para que SQLAlchemy los registre con Base.metadata
+    import src.core.tenant_config  # noqa: F401 — registra TenantConfig en Base
+    try:
+        await init_db()
+    except Exception as e:
+        logger.error("db_init_failed", error=str(e))
+        raise  # Crítico: no podemos arrancar sin DB
 
     # 1. Langfuse v3: registrar singleton global para que CallbackHandler lo reutilice
     try:
@@ -73,10 +83,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Hardening Base CORS
+# Hardening Base CORS — orígenes configurados via settings.CORS_ORIGINS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # En Producción limitar a IP del N8N Server
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -88,3 +98,5 @@ app.add_middleware(
 app.include_router(webhook.router)
 app.include_router(documents.router)
 app.include_router(health.router)   # GET /health, /health/models, /health/rotation
+app.include_router(jobs.router)     # GET /v1/jobs/{task_id} — estado de tareas Celery
+app.include_router(tenants.router)  # CRUD /v1/tenants — configuración por tenant

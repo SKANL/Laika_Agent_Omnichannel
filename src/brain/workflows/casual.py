@@ -1,3 +1,4 @@
+import os
 from langchain_core.messages import SystemMessage
 from langchain_core.runnables import RunnableConfig
 from src.core.state import LaikaState
@@ -7,8 +8,9 @@ import yaml
 
 logger = get_logger("laika_casual")
 
-# Cargamos the registry en memoria
-with open("src/config/prompts_registry.yaml", "r", encoding="utf-8") as file:
+# Path absoluto para compatibilidad con uvicorn y celery worker
+_PROMPTS_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "config", "prompts_registry.yaml")
+with open(_PROMPTS_PATH, "r", encoding="utf-8") as file:
     prompts = yaml.safe_load(file)
 
 async def casual_node(state: LaikaState, config: RunnableConfig) -> dict:
@@ -22,8 +24,10 @@ async def casual_node(state: LaikaState, config: RunnableConfig) -> dict:
     
     logger.info("casual_node_start", tenant=tenant_id)
 
-    # 1. Preparamos el Prompt para la respuesta casual
-    system_prompt = SystemMessage(content=prompts["system_prompts"]["casual_node"])
+    # 1. Preparamos el Prompt con global_backstory como prefijo para coherencia de personalidad
+    backstory = prompts.get("global_backstory", "")
+    casual_prompt = prompts["system_prompts"]["casual_node"]
+    system_prompt = SystemMessage(content=f"{backstory}\n\n{casual_prompt}")
     
     # 2. Invocamos al Tier 2 (Velocista) con rotación automática en 429
     from src.brain.rate_limiter import set_model_cooldown as _cooldown

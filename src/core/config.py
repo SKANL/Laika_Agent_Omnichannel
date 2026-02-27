@@ -9,20 +9,25 @@ from typing import Optional
 # fuertemente tipada. Evitamos el uso anticuado de os.getenv.
 
 class Settings(BaseSettings):
-    # El archivo origen para buscar variables
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # Acepta tanto .env (producción Docker) como .env.local (desarrollo local)
+    model_config = SettingsConfigDict(
+        env_file=(".env", ".env.local"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     # 1. Postgres & RAG
     POSTGRES_USER: str = "laika_admin"
     POSTGRES_PASSWORD: str = "laika_secure_pass_2026"
     POSTGRES_DB: str = "laika_db"
-    
-    # 2. Infra y Tokens
-    JWT_SECRET_KEY: SecretStr = Field(..., description="JWT firma")
-    # REDIS_URL debe incluir la contraseña cuando Redis usa --requirepass.
-    # Formato: redis://:password@host:port/db  (los dos puntos antes de password son obligatorios)
-    # El docker-compose inyecta esta URL con la contraseña correcta en cada contenedor.
-    REDIS_URL: str = Field(default="redis://:laika_redis_secure_2026@localhost:6379/0", description="Cola Worker Celery (incluye auth)")
+
+    # 2. Seguridad y Auth
+    JWT_SECRET_KEY: SecretStr = Field(..., description="JWT firma — obligatorio")
+    JWT_EXPIRE_DAYS: int = Field(default=30, description="Días de validez de JWTs generados")
+    REDIS_URL: str = Field(
+        default="redis://:laika_redis_secure_2026@localhost:6379/0",
+        description="Cola Worker Celery (incluye auth)",
+    )
     TIMEZONE: str = Field(default="America/Mexico_City", description="Timezone para Celery Beat")
 
     # 3. LLMs (Tiers)
@@ -30,7 +35,6 @@ class Settings(BaseSettings):
     CEREBRAS_API_KEY: SecretStr = Field(..., description="API Heavy Lifters")
 
     # 4. Observabilidad (Langfuse v3)
-    # IMPORTANTE: En Langfuse v3, la variable se llama LANGFUSE_BASE_URL, NO LANGFUSE_HOST
     LANGFUSE_BASE_URL: str = Field(default="http://localhost:3000")
     LANGFUSE_SECRET_KEY: str = Field(default="")
     LANGFUSE_PUBLIC_KEY: str = Field(default="")
@@ -38,9 +42,31 @@ class Settings(BaseSettings):
     # 5. Reverse Control (n8n API) & External Access
     N8N_WEBHOOK_URL: HttpUrl = Field(default="http://localhost:5678/")
     N8N_API_KEY: SecretStr = Field(default="", description="Token para autenticarse contra el API/Webhook de n8n")
+    # Path del webhook de n8n al que Laika despacha las respuestas.
+    # Puede incluir un sufijo de canal (/{channel}-reply) para multi-canal.
+    N8N_REPLY_WEBHOOK_PATH: str = Field(
+        default="webhook/laika-reply",
+        description="Path del webhook de n8n para recibir respuestas de Laika",
+    )
 
     # 6. Web Search (Tavily)
     TAVILY_API_KEY: SecretStr = Field(default="", description="API Key para búsquedas web en tiempo real via Tavily")
+
+    # 7. CORS y Rate Limiting
+    CORS_ORIGINS: list = Field(
+        default=["http://localhost:5678", "http://localhost:3000", "http://localhost:4040"],
+        description="Orígenes HTTP permitidos para CORS (limitar a IPs de n8n en producción)",
+    )
+    WEBHOOK_RATE_LIMIT_PER_MINUTE: int = Field(
+        default=60,
+        description="Máximo de requests permitidos por tenant por minuto en el webhook",
+    )
+
+    # 8. Moderación
+    MODERATION_ENABLED: bool = Field(
+        default=False,
+        description="Activar nodo de moderación (requiere modelos activos en models_registry.yaml)",
+    )
 
     @property
     def sync_database_url(self) -> str:

@@ -9,6 +9,8 @@
 # Para generar un token de prueba:
 #   python -c "from jose import jwt; print(jwt.encode({'sub':'test','tenant_id':'demo'}, 'TU_KEY', algorithm='HS256'))"
 
+from datetime import datetime, timedelta
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
@@ -57,11 +59,26 @@ def verify_token(credentials: HTTPAuthorizationCredentials | None = Depends(_bea
         )
 
 
-def generate_dev_token(tenant_id: str, sub: str = "dev") -> str:
+def generate_dev_token(
+    tenant_id: str,
+    sub: str = "dev",
+    expire_days: int | None = None,
+) -> str:
     """
-    Genera un token JWT de desarrollo/prueba.
-    NO usar en producción sin agregar 'exp' (expiración).
+    Genera un token JWT firmado con expiración.
+    Por defecto expira en JWT_EXPIRE_DAYS días (configurado en settings).
+
+    Args:
+        tenant_id: ID del tenant propietario del token.
+        sub:       Sujeto del token (ej. email o user_id).
+        expire_days: Días hasta la expiración. None = usar settings.JWT_EXPIRE_DAYS.
     """
     secret = settings.JWT_SECRET_KEY.get_secret_value()
-    payload = {"sub": sub, "tenant_id": tenant_id, "scope": "webhook:write"}
+    days = expire_days if expire_days is not None else settings.JWT_EXPIRE_DAYS
+    payload = {
+        "sub": sub,
+        "tenant_id": tenant_id,
+        "scope": "webhook:write",
+        "exp": datetime.utcnow() + timedelta(days=days),
+    }
     return jwt.encode(payload, secret, algorithm=ALGORITHM)

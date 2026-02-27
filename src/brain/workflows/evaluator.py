@@ -1,15 +1,22 @@
+import os
 import yaml
 import json
+import asyncio
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.runnables import RunnableConfig
 from src.core.state import LaikaState
 from src.brain.llm_proxy import get_routing_llm
 from structlog import get_logger
 
+# Constante compartida entre evaluator_node y route_after_evaluator.
+# Si se modifica aquí se propaga a ambos lugares.
+MAX_RETRIES = 2
+
 logger = get_logger("laika_evaluator")
 
-# Cargamos registry
-with open("src/config/prompts_registry.yaml", "r", encoding="utf-8") as file:
+# Path absoluto para compatibilidad con uvicorn y celery worker
+_PROMPTS_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "config", "prompts_registry.yaml")
+with open(_PROMPTS_PATH, "r", encoding="utf-8") as file:
     prompts = yaml.safe_load(file)
 
 async def evaluator_node(state: LaikaState, config: RunnableConfig) -> dict:
@@ -35,10 +42,11 @@ async def evaluator_node(state: LaikaState, config: RunnableConfig) -> dict:
     
     logger.info("evaluator_node_start", tenant=tenant_id)
 
+    # Evaluator prompt del YAML — sin backstory global (el evaluador es un juez,
+    # no necesita la persona Laika). Evita Context Rot.
     sys_prompt = SystemMessage(content=prompts["system_prompts"]["evaluator_node"])
-    # IMPORTANTE: Groq requiere que la palabra 'json' aparezca en algún mensaje
-    # cuando se usa response_format={"type": "json_object"}.
-    draft_eval = HumanMessage(content=f"Evalúa este borrador y responde ÚNICAMENTE en formato JSON: {draft_message.content}")
+    # La palabra 'json' debe aparecer en algún mensaje cuando response_format=json_object en Groq.
+    draft_eval = HumanMessage(content=f"Evalúa este borrador y responde en formato JSON:\n\n{draft_message.content}")
 
     # Selección dinámica del modelo con rotación automática en 429
     from src.brain.rate_limiter import set_model_cooldown as _cooldown
@@ -83,6 +91,35 @@ async def evaluator_node(state: LaikaState, config: RunnableConfig) -> dict:
             logger.warning("evaluator_rejected_draft",
                            reason=reason, tenant=tenant_id, retry_count=current_retry)
 
+            # ------------------------------------------------------------------
+            # DLQ: Si se agotan los reintentos, disparar webhook de emergencia.
+            # Se hace ANTES de retornar para que el grafo lo registre aunque
+            # routing lo envíe a "done" en la misma vuelta.
+            # ------------------------------------------------------------------
+            if current_retry >= MAX_RETRIES:
+                thread_id = configurable.get("thread_id", f"{tenant_id}::unknown")
+                logger.error(
+                    "evaluator_max_retries_exhausted_dlq",
+                    tenant=tenant_id,
+                    thread=thread_id,
+                    final_rejection_reason=reason,
+                )
+                try:
+                    from src.brain.tools.n8n_tool import trigger_dlq_webhook
+                    # fire-and-forget: no bloquea el grafo, no lanza excepción al usuario
+                    asyncio.create_task(
+                        trigger_dlq_webhook(
+                            tenant_id=tenant_id,
+                            thread_id=thread_id,
+                            error_msg=(
+                                f"Evaluador agotó {MAX_RETRIES} reintentos. "
+                                f"Último rechazo: {reason}"
+                            ),
+                        )
+                    )
+                except Exception as dlq_err:
+                    logger.warning("evaluator_dlq_fire_failed", error=str(dlq_err))
+
             # Inyectar la critica como HumanMessage para que el orquestador la lea
             # en el proximo intento y corrija exactamente lo que falla.
             return {
@@ -112,7 +149,7 @@ def route_after_evaluator(state: LaikaState) -> str:
     Si el borrador fue rechazado Y aun quedan reintentos -> volver al orquestador.
     Si fue aprobado O se agotaron los reintentos -> terminar.
     """
-    MAX_RETRIES = 2
+    # MAX_RETRIES definido al inicio del módulo — fuente única de verdad.
     approved = state.get("last_eval_approved", True)
     retry_count = state.get("retry_count", 0)
 
